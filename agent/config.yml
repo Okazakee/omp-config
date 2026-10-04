@@ -13,3 +13,21 @@ setupVersion: 2
 extendedContext: true
 dev:
   autoqaConsent: granted
+statusLine:
+  preset: custom
+  leftSegments:
+    - pi
+    - vim
+    - model
+    - mode
+    - collab
+    - stream
+    - path
+    - git
+    - pr
+    - context_pct
+    - cost
+  rightSegments:
+    - status
+    - session_name
+  showHookStatus: false

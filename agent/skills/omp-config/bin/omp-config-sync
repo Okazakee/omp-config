@@ -77,16 +77,24 @@ fi
 [ -s "$STRIPPED.new" ] && mv "$STRIPPED.new" "$STRIPPED" || { rm -f "$STRIPPED.new"; : > "$STRIPPED"; }
 
 # ---------------------------------------------------------------- gates
-echo "gate 1/3: credential-shaped values"
-HITS=$(grep -rInE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' "$STAGE" \
-	--exclude-dir=.git | grep -v 'env:' || true)
-[ -z "$HITS" ] || { echo "$HITS" >&2; fail "credential-shaped values present (above)"; }
+echo "gate 1/4: token-shaped literals anywhere"
+HITS=$(grep -rInE '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' \
+	"$STAGE" --exclude-dir=.git || true)
+[ -z "$HITS" ] || { echo "$HITS" >&2; fail "token-shaped literal present (above)"; }
 
-echo "gate 2/3: private keys and ssh material"
+echo "gate 2/4: credential-shaped values in config files"
+# Scoped to config-shaped files on purpose: in source code `authorization = token…`
+# is ordinary TypeScript, and flagging it makes the gate cry wolf.
+CONF=$(find "$STAGE" -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.jsonc' \
+	-o -name '*.toml' -o -name '.mcp.json' -o -name '.env*' \) -not -path '*/.git/*' || true)
+HITS=$(printf '%s' "$CONF" | xargs -r grep -InE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' 2>/dev/null | grep -v 'env:' || true)
+[ -z "$HITS" ] || { echo "$HITS" >&2; fail "credential-shaped value in a config file (above)"; }
+
+echo "gate 3/4: private keys and ssh material"
 KEYS=$(grep -rlE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' "$STAGE" 2>/dev/null || true)
 [ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material present"; }
 
-echo "gate 3/3: trufflehog"
+echo "gate 4/4: trufflehog"
 if command -v trufflehog >/dev/null 2>&1; then
 	TH=$(trufflehog filesystem "$STAGE" --no-update --results=verified,unknown 2>/dev/null | grep -c '^Finding:' || true)
 	[ "${TH:-0}" -eq 0 ] || fail "trufflehog reported ${TH} finding(s)"

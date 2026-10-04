@@ -1,11 +1,14 @@
 /**
- * Quota status line segment: one status entry per authenticated provider,
- * rendered as `label <icon> 18% · <icon> 31%` in the status line.
+ * Quota status-line row for the provider of the currently selected model.
  *
- * Data comes from `omp usage --json`, the same normalized UsageReports the
- * built-in `usage` segment reads, so omp's 5-minute usage cache and last-good
- * retention apply. Only the short label is configuration; window ids, units and
- * reset times all come from the provider's own report.
+ * Renders one status entry — `commandcode ◷ 5hr: 4% · 7d: 33% · 36.3` — through
+ * `ctx.ui.setStatus`, so it appears wherever the `status` segment sits in
+ * `statusLine.leftSegments` / `rightSegments`.
+ *
+ * Data comes from `omp usage --json`: the same normalized UsageReports the
+ * built-in `usage` segment reads, so omp's 5-minute usage cache and 24-hour
+ * last-good retention apply. Only labels and window names come from config;
+ * window ids, units and values are derived from the report.
  *
  * Overrides live in quota-status.json next to this file.
  */
@@ -40,18 +43,28 @@ const UsageResponse = type({ reports: Report.array().optional() });
 
 const ProviderOverride = type({
 	"label?": "string",
-	"order?": "number",
 	"hidden?": "boolean",
 	"windows?": "string[]",
+	"windowLabels?": type.record("string", "string").optional(),
+	"extraLabels?": type.record("string", "string").optional(),
 });
 
 const Config = type({
 	"refreshMs?": "number",
 	"staleAfterMs?": "number",
+	"warnAt?": "number",
+	"criticalAt?": "number",
 	"shortIcon?": "string",
-	"longIcon?": "string",
-	"icons?": "string",
 	providers: type.record("string", ProviderOverride).optional(),
+});
+
+/** Credit balance for providers omp ships no usage provider for. */
+const CREDIT_ENDPOINTS: Record<string, string> = {
+	openrouter: "https://openrouter.ai/api/v1/credits",
+};
+
+const Credits = type({
+	data: type({ total_credits: "number", total_usage: "number" }),
 });
 
 interface UsageAmountValue {
@@ -77,26 +90,27 @@ interface UsageReportValue {
 
 interface ProviderSettings {
 	label?: string;
-	order?: number;
 	hidden?: boolean;
 	windows?: string[];
+	windowLabels?: Record<string, string>;
+	extraLabels?: Record<string, string>;
 }
 
 interface Settings {
 	refreshMs?: number;
 	staleAfterMs?: number;
+	warnAt?: number;
+	criticalAt?: number;
 	shortIcon?: string;
-	longIcon?: string;
-	icons?: string;
 	providers?: Record<string, ProviderSettings>;
 }
 
-
+const STATUS_KEY = "quota";
 const REFRESH_MS = 300_000;
 const STALE_AFTER_MS = 600_000;
-const SHORT_WINDOW_MS = 12 * 60 * 60 * 1000;
+const WARN_AT = 0.75;
+const CRITICAL_AT = 0.9;
 const SHORT_ICON = "◷";
-const LONG_ICON = "📅";
 
 /** Window ids whose duration the provider does not report. */
 const IMPLICIT_WINDOW_MS: Record<string, number> = {
@@ -104,10 +118,27 @@ const IMPLICIT_WINDOW_MS: Record<string, number> = {
 	"5h": 5 * 60 * 60 * 1000,
 	hourly: 60 * 60 * 1000,
 	daily: 24 * 60 * 60 * 1000,
+	"30d": 30 * 24 * 60 * 60 * 1000,
+	"1mo": 30 * 24 * 60 * 60 * 1000,
 	"1d": 24 * 60 * 60 * 1000,
 	"7d": 7 * 24 * 60 * 60 * 1000,
 	weekly: 7 * 24 * 60 * 60 * 1000,
 	monthly: 30 * 24 * 60 * 60 * 1000,
+};
+
+/** Display names for the window ids providers actually report. */
+const WINDOW_LABELS: Record<string, string> = {
+	"1h": "1hr",
+	"5h": "5hr",
+	monthly: "mo",
+	"30d": "mo",
+	"1mo": "mo",
+	hourly: "hr",
+	"1d": "1d",
+	daily: "1d",
+	"7d": "7d",
+	weekly: "wk",
+	monthly: "mo",
 };
 
 function loadConfig(): Settings {
@@ -132,13 +163,42 @@ function usedFraction(amount: UsageAmountValue): number | undefined {
 	return undefined;
 }
 
-/** Three call sites share this rounding, so it stays one helper. */
+function formatPercent(fraction: number): string {
+	const pct = Math.max(fraction, 0) * 100;
+	return Math.abs(pct - Math.round(pct)) < 0.05 ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`;
+}
+
 function trimNumber(value: number): string {
 	return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(1)));
 }
 
+/**
+ * Severity marker. The status segment renders every status in one accent colour
+ * and `sanitizeStatusText` strips ANSI before that, so per-window colour is not
+ * reachable through this seam — the marker carries the escalation instead.
+ */
+function severityMarker(fraction: number, config: Settings): string {
+	if (fraction >= (config.criticalAt ?? CRITICAL_AT)) return "!";
+	if (fraction >= (config.warnAt ?? WARN_AT)) return "▲";
+	return "";
+}
+
+function windowToken(limit: UsageLimitValue, config: Settings, override: ProviderSettings | undefined): string | undefined {
+	const fraction = usedFraction(limit.amount);
+	if (fraction === undefined) return undefined;
+
+	const id = limit.window?.id?.toLowerCase() ?? "";
+	const name = override?.windowLabels?.[limit.window?.id ?? ""] ?? WINDOW_LABELS[id] ?? limit.window?.id;
+	if (!name) return undefined;
+
+	const durationMs = limit.window?.durationMs ?? IMPLICIT_WINDOW_MS[id];
+	const isShort = durationMs !== undefined && durationMs <= 12 * 60 * 60 * 1000;
+	const icon = isShort ? (config.shortIcon ?? SHORT_ICON) : "";
+	return `${icon ? `${icon} ` : ""}${name}: ${formatPercent(fraction)}${severityMarker(fraction, config)}`;
+}
+
 /** A windowless bucket (credit balance, key cap) has no percentage to show. */
-function renderWindowless(limit: UsageLimitValue): string | undefined {
+function plainValue(limit: UsageLimitValue): string | undefined {
 	const { amount } = limit;
 	if (typeof amount.remaining === "number") {
 		return amount.unit === "usd" ? `$${trimNumber(amount.remaining)}` : trimNumber(amount.remaining);
@@ -149,24 +209,7 @@ function renderWindowless(limit: UsageLimitValue): string | undefined {
 	return undefined;
 }
 
-function renderWindow(limit: UsageLimitValue, config: Settings): string | undefined {
-	const fraction = usedFraction(limit.amount);
-	if (fraction === undefined) return undefined;
-
-	const durationMs =
-		limit.window?.durationMs ?? IMPLICIT_WINDOW_MS[limit.window?.id?.toLowerCase() ?? ""];
-	const text = `${Math.round(Math.max(fraction, 0) * 100)}%`;
-	if (config.icons === "text") {
-		return `${limit.window?.id ?? limit.window?.label ?? limit.label ?? ""} ${text}`.trim();
-	}
-	const icon =
-		typeof durationMs === "number" && durationMs > SHORT_WINDOW_MS
-			? (config.longIcon ?? LONG_ICON)
-			: (config.shortIcon ?? SHORT_ICON);
-	return `${icon} ${text}`;
-}
-
-function renderProvider(report: UsageReportValue, config: Settings, stale: boolean): string | undefined {
+function renderReport(report: UsageReportValue, config: Settings, stale: boolean): string | undefined {
 	const override = config.providers?.[report.provider];
 	if (override?.hidden) return undefined;
 
@@ -175,13 +218,86 @@ function renderProvider(report: UsageReportValue, config: Settings, stale: boole
 		if (override?.windows && !override.windows.some(w => w === limit.window?.id || limit.id.endsWith(`:${w}`))) {
 			continue;
 		}
-		parts.push((limit.window ? renderWindow(limit, config) : renderWindowless(limit)) ?? "");
+		if (limit.window) {
+			parts.push(windowToken(limit, config, override) ?? "");
+			continue;
+		}
+		// Windowless buckets (credit balance, key cap) have no window name, so the
+		// label comes from `extraLabels`, keyed by full limit id or its suffix.
+		const value = plainValue(limit);
+		if (!value) continue;
+		const name = override?.extraLabels?.[limit.id] ?? override?.extraLabels?.[limit.id.split(":").pop() ?? ""];
+		parts.push(name ? `${name}: ${value}` : value);
 	}
 
 	const body = parts.filter(Boolean).join(" · ");
 	if (!body) return undefined;
 	// The status segment collapses runs of spaces, so staleness rides on the label.
-	return `${override?.label ?? report.provider}${stale ? "?" : ""} ${body}`;
+	const label = override?.label ?? report.provider;
+	return `${label}${stale ? "?" : ""} ${body}`;
+}
+
+/** Providers with no omp usage provider still get a balance, read via the CLI. */
+async function fetchCreditBalance(pi: ExtensionAPI, provider: string): Promise<number | undefined> {
+	const endpoint = CREDIT_ENDPOINTS[provider];
+	if (!endpoint) return undefined;
+	try {
+		const token = await pi.exec("omp", ["token", provider], { timeout: 10_000 });
+		const apiKey = token.stdout.trim();
+		if (token.code !== 0 || !apiKey) return undefined;
+
+		const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` } });
+		if (!response.ok) return undefined;
+
+		const parsed = Credits(await response.json());
+		if (parsed instanceof type.errors) return undefined;
+		return parsed.data.total_credits - parsed.data.total_usage;
+	} catch {
+		return undefined;
+	}
+}
+
+const CCSummary = type({ "totalMonthlyCredits?": "number", "totalCost?": "number" });
+const CCCredits = type({
+	credits: type({
+		"monthlyCredits?": "number",
+		"purchasedCredits?": "number",
+		"freeCredits?": "number",
+	}),
+});
+
+/**
+ * CommandCode publishes no monthly window: `/alpha/billing/credits` carries
+ * only fiveHour and weekly, so the monthly figure is derived from monthly spend
+ * against the total credit pool. Returns a used fraction.
+ */
+async function fetchCommandCodeMonthly(pi: ExtensionAPI): Promise<number | undefined> {
+	try {
+		const token = await pi.exec("omp", ["token", "commandcode"], { timeout: 10_000 });
+		const authorization = token.stdout.trim();
+		if (token.code !== 0 || !authorization) return undefined;
+
+		const headers = { Authorization: `Bearer ${authorization}`, Accept: "application/json" };
+		const [summaryRes, creditsRes] = await Promise.all([
+			fetch("https://api.commandcode.ai/alpha/usage/summary", { headers }),
+			fetch("https://api.commandcode.ai/alpha/billing/credits", { headers }),
+		]);
+		if (!summaryRes.ok || !creditsRes.ok) return undefined;
+
+		const summary = CCSummary(await summaryRes.json());
+		const credits = CCCredits(await creditsRes.json());
+		if (summary instanceof type.errors || credits instanceof type.errors) return undefined;
+
+		const spent = summary.totalMonthlyCredits ?? summary.totalCost ?? 0;
+		const pool =
+			(credits.credits.monthlyCredits ?? 0) +
+			(credits.credits.purchasedCredits ?? 0) +
+			(credits.credits.freeCredits ?? 0) +
+			spent;
+		return pool > 0 ? spent / pool : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export default function quotaStatus(pi: ExtensionAPI): void {
@@ -192,46 +308,73 @@ export default function quotaStatus(pi: ExtensionAPI): void {
 
 		const config = loadConfig();
 		const staleAfterMs = config.staleAfterMs ?? STALE_AFTER_MS;
-		/** provider id → epoch ms of the last report that actually carried data. */
-		const lastDataAt = new Map<string, number>();
-		/** Status keys written by the previous run, so vanished providers get cleared. */
-		const publishedKeys = new Set<string>();
+		let reports: UsageReportValue[] = [];
+		let lastDataAt = 0;
+		/** provider id → remaining balance, for providers omp has no usage provider for. */
+		const credits = new Map<string, number>();
+		/** provider id → monthly used fraction, for windows the provider never publishes. */
+		const monthly = new Map<string, number>();
 
 		const run = async (): Promise<void> => {
-			let reports: UsageReportValue[];
 			try {
 				const result = await pi.exec("omp", ["usage", "--json"], { timeout: 20_000 });
 				const parsed = UsageResponse(JSON.parse(result.stdout.slice(result.stdout.indexOf("{"))));
 				reports = parsed.reports ?? [];
+				if (reports.some(report => (report.limits?.length ?? 0) > 0)) lastDataAt = Date.now();
 			} catch {
 				return; // Keep the last rendered values rather than blanking the line.
 			}
+			for (const provider of Object.keys(CREDIT_ENDPOINTS)) {
+				// A real usage report always wins over the balance fallback.
+				if (reports.some(report => report.provider === provider)) continue;
+				const balance = await fetchCreditBalance(pi, provider);
+				if (balance === undefined) credits.delete(provider);
+				else {
+					credits.set(provider, balance);
+					lastDataAt = Date.now();
+				}
+			}
+			const commandCodeMonthly = await fetchCommandCodeMonthly(pi);
+			if (commandCodeMonthly === undefined) monthly.delete("commandcode");
+			else monthly.set("commandcode", commandCodeMonthly);
+		};
 
-			const now = Date.now();
-			const ordered = [...reports].sort(
-				(a, b) => (config.providers?.[a.provider]?.order ?? 100) - (config.providers?.[b.provider]?.order ?? 100),
+		// Rendering is cheap, so it runs on its own cadence: switching models must
+		// change the row immediately, without re-fetching usage every tick.
+		const render = (): void => {
+			const provider = ctx.model?.provider;
+			if (!provider) {
+				ctx.ui.setStatus(STATUS_KEY, undefined);
+				return;
+			}
+
+			const report = reports.find(r => r.provider === provider);
+			if (report) {
+				const row = renderReport(report, config, Date.now() - lastDataAt > staleAfterMs);
+				const fraction = monthly.get(provider);
+				// CommandCode publishes no monthly window; append the derived one.
+				const derived = fraction === undefined || row?.includes(" mo: ") ? undefined : `mo: ${formatPercent(fraction)}`;
+				const parts = [row, derived].filter(Boolean);
+				ctx.ui.setStatus(STATUS_KEY, parts.length > 0 ? parts.join(" · ") : undefined);
+				return;
+			}
+
+			// No usage provider for this one (OpenRouter): show the credit balance.
+			const balance = credits.get(provider);
+			const label = config.providers?.[provider]?.label ?? provider;
+			ctx.ui.setStatus(
+				STATUS_KEY,
+				balance === undefined ? undefined : `${label} $${trimNumber(balance)}`,
 			);
-			const liveKeys = new Set<string>();
-			for (const [index, report] of ordered.entries()) {
-				// Only a report that actually carries limits counts as fresh data.
-				if ((report.limits?.length ?? 0) > 0) lastDataAt.set(report.provider, now);
-				// Zero-padded so the status segment's lexical key order matches `order`.
-				const key = `quota:${String(index).padStart(2, "0")}:${report.provider}`;
-				liveKeys.add(key);
-				ctx.ui.setStatus(
-					key,
-					renderProvider(report, config, now - (lastDataAt.get(report.provider) ?? now) > staleAfterMs),
-				);
-			}
-			for (const key of publishedKeys) {
-				if (!liveKeys.has(key)) ctx.ui.setStatus(key, undefined);
-			}
-			publishedKeys.clear();
-			for (const key of liveKeys) publishedKeys.add(key);
 		};
 
 		await run();
-		const timer = setInterval(() => void run(), config.refreshMs ?? REFRESH_MS);
-		pi.on("session_shutdown", () => ctx.clearTimer(timer));
+		render();
+		const usageTimer = ctx.setInterval(() => void run().then(render), config.refreshMs ?? REFRESH_MS);
+		const renderTimer = ctx.setInterval(render, 5_000);
+		pi.on("session_shutdown", () => {
+			ctx.clearTimer(usageTimer);
+			ctx.clearTimer(renderTimer);
+		});
 	});
 }
