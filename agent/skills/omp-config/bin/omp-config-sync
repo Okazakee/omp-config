@@ -210,10 +210,13 @@ Sync runs on demand, never on a timer:
     agent/skills/omp-config/bin/omp-config-sync --push     # commit, then push after confirming
 
 The sync copies an allowlist out of the omp agent directory, strips literal
-`apiKey:` and broker-token values, normalizes absolute home paths to `~/`, then
-runs three gates before staging anything: a credential-shape grep, a
-private-key grep, and `trufflehog filesystem`. Nothing is committed without a
-diff review.
+`apiKey:` and broker-token values, and normalizes absolute home paths to `~/`.
+
+It then runs five gates while staging, and a final sweep against the **staged
+index** — so what is audited is literally what would be committed: token-shaped
+literals and private keys block the commit, credential-shaped values raise an
+advisory review, and `trufflehog` scans an export of the index. `trufflehog` is
+mandatory before `--push`. Nothing is committed without a diff review either.
 
 ## Authoring extensions
 
@@ -232,26 +235,8 @@ if [ -n "$BASE" ]; then
 	sed -i "s|__REPO_CLONE__|$SAFE_REMOTE|g" "$REPO/README.md"
 fi
 
-# ---------------------------------------------------------------- final sweep
-# The gates above covered agent/ only, and README/versions.env are written after
-# them. Sweep the whole working tree once more, immediately before staging, so
-# nothing generated late — and nothing dropped at the repo root — slips past.
+# ---------------------------------------------------------------- stage
 cd "$REPO"
-echo "final sweep: whole working tree"
-FINAL=$(grep -rInE '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' . --exclude-dir=.git || true)
-[ -z "$FINAL" ] || { echo "$FINAL" >&2; fail "token-shaped literal anywhere in the repo (above)"; }
-KEYS=$(grep -rlE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' . --exclude-dir=.git 2>/dev/null || true)
-[ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material anywhere in the repo"; }
-if command -v trufflehog >/dev/null 2>&1; then
-	TH=$(trufflehog filesystem "$REPO" --no-update --results=verified,unknown 2>/dev/null | grep -c '^Finding:' || true)
-	[ "${TH:-0}" -eq 0 ] || fail "trufflehog reported ${TH} finding(s) across the whole repo"
-	echo "  trufflehog clean (whole repo)"
-else
-	[ "$PUSH" -eq 1 ] && fail "trufflehog is not installed; it is required before --push"
-	echo "  trufflehog not installed — final sweep skipped (required for --push)"
-fi
-
-# ---------------------------------------------------------------- commit
 git init -q 2>/dev/null || true
 # Merge rather than create: an existing .gitignore must gain the patterns too.
 touch .gitignore
@@ -260,6 +245,38 @@ for pat in '*.bak-*' '.DS_Store' '.env' '.env.*' '*.pem' '*.key' '*.p12' '*.pfx'
 	grep -qxF "$pat" .gitignore || printf '%s\n' "$pat" >> .gitignore
 done
 git add -A
+
+# ---------------------------------------------------------------- index sweep
+# Audited against the staged index, not the working tree: what is checked is
+# literally what would be committed. Consequences, both intended — an ignored
+# local .env can no longer block a sync, and there is no window between the scan
+# and the staging it was supposed to describe.
+echo "index sweep: staged snapshot ($(git diff --cached --name-only | wc -l) file(s))"
+FINAL=$(git grep --cached -nI -E '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' -- . || true)
+[ -z "$FINAL" ] || { echo "$FINAL" >&2; fail "token-shaped literal in the staged snapshot (above)"; }
+KEYS=$(git grep --cached -lI -E -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' -- . || true)
+[ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material in the staged snapshot"; }
+
+# Advisory across every staged file: the hard gate stays scoped to config files
+# (in source, `token = token.stdout…` is ordinary code), but a stray
+# `password=<long secret>` at the repo root should still reach the reviewer's eyes.
+REVIEW=$(git grep --cached -nI -iE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' -- . || true)
+if [ -n "$REVIEW" ]; then
+	echo "  REVIEW before committing — credential-shaped value in a staged file:"
+	printf '%s\n' "$REVIEW" | sed 's/^/    /'
+fi
+
+if command -v trufflehog >/dev/null 2>&1; then
+	IDX=$(mktemp -d)
+	git checkout-index -a -f --prefix="$IDX/" 2>/dev/null || true
+	TH=$(trufflehog filesystem "$IDX" --no-update --results=verified,unknown 2>/dev/null | grep -c '^Finding:' || true)
+	rm -rf "$IDX"
+	[ "${TH:-0}" -eq 0 ] || fail "trufflehog reported ${TH} finding(s) in the staged snapshot"
+	echo "  trufflehog clean (staged snapshot)"
+else
+	[ "$PUSH" -eq 1 ] && fail "trufflehog is not installed; it is required before --push"
+	echo "  trufflehog not installed — index sweep skipped (required for --push)"
+fi
 echo
 git diff --cached --stat | tail -20
 if [ "$YES" -ne 1 ]; then

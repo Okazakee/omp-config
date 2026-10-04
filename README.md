@@ -47,10 +47,13 @@ Sync runs on demand, never on a timer:
     agent/skills/omp-config/bin/omp-config-sync --push     # commit, then push after confirming
 
 The sync copies an allowlist out of the omp agent directory, strips literal
-`apiKey:` and broker-token values, normalizes absolute home paths to `~/`, then
-runs three gates before staging anything: a credential-shape grep, a
-private-key grep, and `trufflehog filesystem`. Nothing is committed without a
-diff review.
+`apiKey:` and broker-token values, and normalizes absolute home paths to `~/`.
+
+It then runs five gates while staging, and a final sweep against the **staged
+index** — so what is audited is literally what would be committed: token-shaped
+literals and private keys block the commit, credential-shaped values raise an
+advisory review, and `trufflehog` scans an export of the index. `trufflehog` is
+mandatory before `--push`. Nothing is committed without a diff review either.
 
 ## Authoring extensions
 
