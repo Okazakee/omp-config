@@ -257,10 +257,11 @@ FINAL=$(git grep --cached -nI -E '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gi
 KEYS=$(git grep --cached -lI -E -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' -- . || true)
 [ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material in the staged snapshot"; }
 
-# Advisory across every staged file: the hard gate stays scoped to config files
-# (in source, `token = token.stdout…` is ordinary code), but a stray
-# `password=<long secret>` at the repo root should still reach the reviewer's eyes.
-REVIEW=$(git grep --cached -nI -iE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' -- . || true)
+# Advisory across every staged file. The value class deliberately excludes `.`
+# and demands 12+ characters: that separates a bare secret (`password=hunter2…`)
+# from ordinary code (`const apiKey = token.stdout.trim()`), which is property
+# access. It stays advisory so a false positive never blocks a backup.
+REVIEW=$(git grep --cached -nI -iE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_/+-]{12,}' -- . || true)
 if [ -n "$REVIEW" ]; then
 	echo "  REVIEW before committing — credential-shaped value in a staged file:"
 	printf '%s\n' "$REVIEW" | sed 's/^/    /'
