@@ -81,12 +81,14 @@ if [ -f "$AGENT_DIR/config.yml" ]; then
 fi
 
 # Home paths leak a username into a public repo; normalize them.
-if grep -rl "/$HOME/" "$STAGE" >/dev/null 2>&1; then
-	grep -rl "/$HOME/" "$STAGE" | while IFS= read -r f; do
-		sed -i "s|/$HOME/|~/|g" "$f"
-		echo "  normalized ~ paths in ${f#$REPO/}"
-	done
-fi
+# `/$HOME/` would expand to `//home/user/` — a double slash that matches nothing —
+# so match the home prefix as a fixed string instead. The `|| true` is load-bearing:
+# grep exits 1 when it matches nothing, which under `set -euo pipefail` would abort
+# the entire sync on a tree that simply has no absolute home paths.
+grep -rlF "$HOME/" "$STAGE" 2>/dev/null | while IFS= read -r f; do
+	sed -i "s|$HOME/|~/|g" "$f"
+	echo "  normalized ~ paths in ${f#$REPO/}"
+done || true
 
 [ -s "$STRIPPED.new" ] && mv "$STRIPPED.new" "$STRIPPED" || { rm -f "$STRIPPED.new"; : > "$STRIPPED"; }
 
@@ -220,17 +222,43 @@ The extension package and its house rules are documented in
 README_EOF
 
 REMOTE=$(git -C "$REPO" remote get-url origin 2>/dev/null || echo "")
+# Strip inline credentials before the URL is written into a public file:
+# https://user:token@host/… would otherwise be committed verbatim.
+SAFE_REMOTE=$(printf '%s' "$REMOTE" | sed -E 's|^(https?://)[^/@]+@|\1|')
 # An ssh remote cannot be curled; derive the browsable https base from it.
-BASE=$(printf '%s' "$REMOTE" | sed -E 's|^git@([^:]+):(.+)\.git$|https://\1/\2|; s|^ssh://git@([^/]+)/(.+)\.git$|https://\1/\2|; s|^https?://(.+)\.git$|https://\1|')
+BASE=$(printf '%s' "$SAFE_REMOTE" | sed -E 's|^git@([^:]+):(.+)\.git$|https://\1/\2|; s|^ssh://git@([^/]+)/(.+)\.git$|https://\1/\2|; s|^https?://(.+)\.git$|https://\1|')
 if [ -n "$BASE" ]; then
 	sed -i "s|__REPO_BASE__|$BASE|g" "$REPO/README.md"
-	sed -i "s|__REPO_CLONE__|$REMOTE|g" "$REPO/README.md"
+	sed -i "s|__REPO_CLONE__|$SAFE_REMOTE|g" "$REPO/README.md"
+fi
+
+# ---------------------------------------------------------------- final sweep
+# The gates above covered agent/ only, and README/versions.env are written after
+# them. Sweep the whole working tree once more, immediately before staging, so
+# nothing generated late — and nothing dropped at the repo root — slips past.
+cd "$REPO"
+echo "final sweep: whole working tree"
+FINAL=$(grep -rInE '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' . --exclude-dir=.git || true)
+[ -z "$FINAL" ] || { echo "$FINAL" >&2; fail "token-shaped literal anywhere in the repo (above)"; }
+KEYS=$(grep -rlE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' . --exclude-dir=.git 2>/dev/null || true)
+[ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material anywhere in the repo"; }
+if command -v trufflehog >/dev/null 2>&1; then
+	TH=$(trufflehog filesystem "$REPO" --no-update --results=verified,unknown 2>/dev/null | grep -c '^Finding:' || true)
+	[ "${TH:-0}" -eq 0 ] || fail "trufflehog reported ${TH} finding(s) across the whole repo"
+	echo "  trufflehog clean (whole repo)"
+else
+	[ "$PUSH" -eq 1 ] && fail "trufflehog is not installed; it is required before --push"
+	echo "  trufflehog not installed — final sweep skipped (required for --push)"
 fi
 
 # ---------------------------------------------------------------- commit
-cd "$REPO"
 git init -q 2>/dev/null || true
-[ -f .gitignore ] || printf '*.bak-*\n.DS_Store\n' > .gitignore
+# Merge rather than create: an existing .gitignore must gain the patterns too.
+touch .gitignore
+for pat in '*.bak-*' '.DS_Store' '.env' '.env.*' '*.pem' '*.key' '*.p12' '*.pfx' \
+	'id_rsa*' 'id_ed25519*' 'auth.json' 'secrets.yml'; do
+	grep -qxF "$pat" .gitignore || printf '%s\n' "$pat" >> .gitignore
+done
 git add -A
 echo
 git diff --cached --stat | tail -20
