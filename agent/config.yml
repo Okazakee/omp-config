@@ -5,7 +5,7 @@ modelRoles:
   vision: commandcode/stealth/space-bunny-alpha:high
 symbolPreset: nerd
 composer:
-  shape: claude
+  shape: pi
 theme:
   dark: titanium
   light: light
@@ -28,6 +28,6 @@ statusLine:
     - context_pct
     - cost
   rightSegments:
-    - status
     - session_name
+    - status
   showHookStatus: false
