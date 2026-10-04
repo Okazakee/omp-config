@@ -25,7 +25,7 @@ fi
 
 # Allowlist: files copied verbatim (sanitized first), directories copied wholesale.
 FILES=(config.yml config.yaml models.yml keybindings.json keybindings.yml keybindings.yaml
-	RULES.md SYSTEM.md SYSTEM_TEMPLATE.md APPEND_SYSTEM.md TITLE_SYSTEM.md)
+	RULES.md SYSTEM.md SYSTEM_TEMPLATE.md APPEND_SYSTEM.md TITLE_SYSTEM.md quota-status.json)
 DIRS=(pack skills extensions tools commands rules prompts instructions hooks)
 
 STAGE="$REPO/agent"
@@ -87,7 +87,9 @@ echo "gate 2/4: credential-shaped values in config files"
 # is ordinary TypeScript, and flagging it makes the gate cry wolf.
 CONF=$(find "$STAGE" -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.jsonc' \
 	-o -name '*.toml' -o -name '.mcp.json' -o -name '.env*' \) -not -path '*/.git/*' || true)
-HITS=$(printf '%s' "$CONF" | xargs -r grep -InE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' 2>/dev/null | grep -v 'env:' || true)
+# `-i` is load-bearing: config keys are camelCase (apiKey) as often as snake_case
+# (api_key), and a case-sensitive gate silently misses half of them.
+HITS=$(printf '%s' "$CONF" | xargs -r grep -inE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' 2>/dev/null | grep -vi 'env:' || true)
 [ -z "$HITS" ] || { echo "$HITS" >&2; fail "credential-shaped value in a config file (above)"; }
 
 echo "gate 3/4: private keys and ssh material"

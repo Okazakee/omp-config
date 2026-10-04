@@ -1,0 +1,9 @@
+{
+  "providers": {
+    "commandcode": {
+      "extraLabels": {
+        "balance": "bal"
+      }
+    }
+  }
+}

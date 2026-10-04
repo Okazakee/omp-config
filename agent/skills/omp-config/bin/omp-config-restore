@@ -89,7 +89,7 @@ copy_tree() { # src dst
 	cp -r "$1" "$2"; COPIED=$((COPIED+1))
 }
 for f in config.yml config.yaml models.yml keybindings.json keybindings.yml keybindings.yaml \
-	RULES.md SYSTEM.md SYSTEM_TEMPLATE.md APPEND_SYSTEM.md TITLE_SYSTEM.md .mcp.json; do
+	RULES.md SYSTEM.md SYSTEM_TEMPLATE.md APPEND_SYSTEM.md TITLE_SYSTEM.md quota-status.json .mcp.json; do
 	[ -f "$WORK/agent/$f" ] && copy_tree "$WORK/agent/$f" "$TARGET/$f"
 done
 for d in pack skills extensions tools commands rules prompts instructions hooks; do
