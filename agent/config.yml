@@ -1,0 +1,15 @@
+modelRoles:
+  default: commandcode/meta/muse-spark-1.3-contributor:xhigh
+  slow: openai-codex/gpt-6.1-sol:xhigh
+  smol: openrouter/stealth/space-bunny-alpha:high
+  vision: commandcode/stealth/space-bunny-alpha:high
+symbolPreset: nerd
+composer:
+  shape: claude
+theme:
+  dark: titanium
+  light: light
+setupVersion: 2
+extendedContext: true
+dev:
+  autoqaConsent: granted

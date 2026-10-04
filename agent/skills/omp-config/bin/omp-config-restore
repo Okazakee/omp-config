@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Bootstrap a machine from the pinned omp-config repo: bun, omp, then config.
+set -euo pipefail
+
+REPO="${OMP_CONFIG_REPO:-git@github.com:Okazakee/omp-config.git}"
+TARGET=""
+DRY=0
+FORCE=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--repo=*) REPO="${1#--repo=}" ;;
+	--target=*) TARGET="${1#--target=}" ;;
+	--dry-run) DRY=1 ;;
+	--force) FORCE=1 ;;
+	-h | --help) echo "usage: omp-config-restore [--repo=URL|PATH] [--target=DIR] [--dry-run] [--force]"; exit 0 ;;
+	*) echo "unknown argument: $1" >&2; exit 2 ;;
+	esac
+	shift
+done
+
+run() { if [ "$DRY" -eq 1 ]; then echo "  would: $*"; else "$@"; fi; }
+
+profile="${OMP_PROFILE:-${PI_PROFILE:-}}"
+if [ -n "$profile" ] && [ "$profile" != "default" ]; then
+	DEFAULT_TARGET="$HOME/.omp/profiles/$profile/agent"
+else
+	DEFAULT_TARGET="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
+fi
+TARGET="${TARGET:-$DEFAULT_TARGET}"
+
+echo "==> target agent dir: $TARGET"
+
+# ---------------------------------------------------------------- 1. bun
+if command -v bun >/dev/null 2>&1; then
+	echo "==> bun $(bun --version) present"
+else
+	echo "==> bun missing — installing"
+	if command -v npm >/dev/null 2>&1; then
+		run npm install -g bun
+	else
+		run bash -c 'curl -fsSL https://bun.sh/install | bash'
+	fi
+	export PATH="$HOME/.bun/bin:$PATH"
+fi
+
+# ---------------------------------------------------------------- 2. repo
+WORK="$HOME/.omp-config-restore"
+if [ -d "$WORK/.git" ]; then
+	echo "==> updating $WORK"
+	run git -C "$WORK" pull -q --ff-only
+elif [ -d "$REPO" ] && [ -d "$REPO/.git" ]; then
+	echo "==> using local repo $REPO"
+	WORK="$REPO"
+else
+	echo "==> cloning $REPO"
+	run git clone -q --depth 1 "$REPO" "$WORK"
+fi
+[ -f "$WORK/versions.env" ] || { echo "no versions.env in repo — is this an omp-config repo?" >&2; exit 1; }
+# shellcheck disable=SC1091
+. "$WORK/versions.env"
+echo "==> pinned: omp $OMP_VERSION, bun $BUN_VERSION, profile ${PROFILE:-default}"
+
+# ---------------------------------------------------------------- 3. omp
+if command -v omp >/dev/null 2>&1; then
+	HAVE=$(omp --version 2>/dev/null | sed 's|^omp/||' || echo unknown)
+	if [ "$HAVE" = "$OMP_VERSION" ]; then
+		echo "==> omp $HAVE present (matches pin)"
+	else
+		echo "==> omp $HAVE != pin $OMP_VERSION — reinstalling"
+		run bun install -g "@oh-my-pi/pi-coding-agent@$OMP_VERSION"
+	fi
+else
+	echo "==> omp missing — installing @oh-my-pi/pi-coding-agent@$OMP_VERSION"
+	run bun install -g "@oh-my-pi/pi-coding-agent@$OMP_VERSION"
+fi
+
+# ---------------------------------------------------------------- 4. config
+mkdir -p "$TARGET"
+COPIED=0; SKIPPED=0
+copy_tree() { # src dst
+	[ -e "$1" ] || return 0
+	if [ -e "$2" ] && [ "$FORCE" -ne 1 ]; then
+		echo "    skip (exists): ${2#$TARGET/}"; SKIPPED=$((SKIPPED+1)); return 0
+	fi
+	if [ "$DRY" -eq 1 ]; then
+		echo "    would copy: ${2#$TARGET/}"; COPIED=$((COPIED+1)); return 0
+	fi
+	[ -e "$2" ] && mv "$2" "$2.bak-$(date -u +%Y%m%d%H%M%S)"
+	cp -r "$1" "$2"; COPIED=$((COPIED+1))
+}
+for f in config.yml config.yaml models.yml keybindings.json keybindings.yml keybindings.yaml \
+	RULES.md SYSTEM.md SYSTEM_TEMPLATE.md APPEND_SYSTEM.md TITLE_SYSTEM.md .mcp.json; do
+	[ -f "$WORK/agent/$f" ] && copy_tree "$WORK/agent/$f" "$TARGET/$f"
+done
+for d in pack skills extensions tools commands rules prompts instructions hooks; do
+	[ -d "$WORK/agent/$d" ] && copy_tree "$WORK/agent/$d" "$TARGET/$d"
+done
+
+echo "==> copied $COPIED item(s), skipped $SKIPPED existing"
+echo "    never touched: agent.db, history.db, models.db, stats.db, sessions/, blobs/, cache/"
+
+# ---------------------------------------------------------------- 5. manual
+echo
+echo "==> remaining manual steps (no secrets were restored):"
+if [ -s "$WORK/agent/.sanitized.txt" ]; then
+	echo "    values removed at backup time — set these from your own secrets:"
+	sed 's/^/      /' "$WORK/agent/.sanitized.txt"
+fi
+echo "    1. export the environment variables above"
+echo "    2. per provider: omp auth-broker login <provider>   (or /login <provider>)"
+echo "    3. restart omp; check with: omp --version && omp usage"
+[ "$DRY" -eq 1 ] && echo && echo "dry run — nothing was installed or copied"
