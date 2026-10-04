@@ -51,12 +51,46 @@ const Config = type({
 	"shortIcon?": "string",
 	"longIcon?": "string",
 	"icons?": "string",
-	providers: type.Record("string", ProviderOverride).optional(),
+	providers: type.record("string", ProviderOverride).optional(),
 });
 
-type UsageLimit = ReturnType<typeof Limit.infer>;
-type UsageReport = ReturnType<typeof Report.infer>;
-type Settings = ReturnType<typeof Config.infer>;
+interface UsageAmountValue {
+	used?: number;
+	limit?: number;
+	remaining?: number;
+	usedFraction?: number;
+	unit: string;
+}
+
+interface UsageLimitValue {
+	id: string;
+	label?: string;
+	window?: { id?: string; label?: string; durationMs?: number };
+	amount: UsageAmountValue;
+}
+
+interface UsageReportValue {
+	provider: string;
+	fetchedAt: number;
+	limits?: UsageLimitValue[];
+}
+
+interface ProviderSettings {
+	label?: string;
+	order?: number;
+	hidden?: boolean;
+	windows?: string[];
+}
+
+interface Settings {
+	refreshMs?: number;
+	staleAfterMs?: number;
+	shortIcon?: string;
+	longIcon?: string;
+	icons?: string;
+	providers?: Record<string, ProviderSettings>;
+}
+
 
 const REFRESH_MS = 300_000;
 const STALE_AFTER_MS = 600_000;
@@ -86,7 +120,7 @@ function loadConfig(): Settings {
 }
 
 /** Mirrors core's `resolveUsedFraction` precedence so numbers match `omp usage`. */
-function usedFraction(amount: ReturnType<typeof Amount.infer>): number | undefined {
+function usedFraction(amount: UsageAmountValue): number | undefined {
 	if (typeof amount.usedFraction === "number") return amount.usedFraction;
 	if (typeof amount.used === "number" && amount.unit === "percent") return amount.used / 100;
 	if (typeof amount.used === "number" && typeof amount.limit === "number" && amount.limit > 0) {
@@ -104,7 +138,7 @@ function trimNumber(value: number): string {
 }
 
 /** A windowless bucket (credit balance, key cap) has no percentage to show. */
-function renderWindowless(limit: UsageLimit): string | undefined {
+function renderWindowless(limit: UsageLimitValue): string | undefined {
 	const { amount } = limit;
 	if (typeof amount.remaining === "number") {
 		return amount.unit === "usd" ? `$${trimNumber(amount.remaining)}` : trimNumber(amount.remaining);
@@ -115,7 +149,7 @@ function renderWindowless(limit: UsageLimit): string | undefined {
 	return undefined;
 }
 
-function renderWindow(limit: UsageLimit, config: Settings): string | undefined {
+function renderWindow(limit: UsageLimitValue, config: Settings): string | undefined {
 	const fraction = usedFraction(limit.amount);
 	if (fraction === undefined) return undefined;
 
@@ -132,7 +166,7 @@ function renderWindow(limit: UsageLimit, config: Settings): string | undefined {
 	return `${icon} ${text}`;
 }
 
-function renderProvider(report: UsageReport, config: Settings, stale: boolean): string | undefined {
+function renderProvider(report: UsageReportValue, config: Settings, stale: boolean): string | undefined {
 	const override = config.providers?.[report.provider];
 	if (override?.hidden) return undefined;
 
@@ -164,7 +198,7 @@ export default function quotaStatus(pi: ExtensionAPI): void {
 		const publishedKeys = new Set<string>();
 
 		const run = async (): Promise<void> => {
-			let reports: UsageReport[];
+			let reports: UsageReportValue[];
 			try {
 				const result = await pi.exec("omp", ["usage", "--json"], { timeout: 20_000 });
 				const parsed = UsageResponse(JSON.parse(result.stdout.slice(result.stdout.indexOf("{"))));

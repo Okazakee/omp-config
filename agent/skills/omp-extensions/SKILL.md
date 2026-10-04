@@ -1,6 +1,6 @@
 ---
 name: omp-extensions
-description: House rules and working reference for authoring custom omp extensions. Use when writing, reviewing or debugging an omp extension, hook, custom tool, provider usage provider, or any TUI add-on (status-line element, widget, quota monitor, thinking-level badge), when deciding where user-owned files belong under the omp config directory, or when adding a new capability to the existing local extension package.
+description: Authoring omp extensions: layout, ExtensionAPI, TUI seams, rules that don't break core.
 ---
 
 # Authoring custom omp extensions

@@ -1,6 +1,6 @@
 ---
 name: omp-config
-description: Back up and restore omp configuration through a public GitHub repo without leaking secrets. Use when the user asks to back up, sync, snapshot, restore or reinstall their omp setup, to set up a new machine from the saved config, to check what omp config is safe to publish, or to audit a config directory for credentials before it goes public.
+description: Back up and restore omp config via public GitHub, without leaking secrets.
 ---
 
 # omp config backup and restore
