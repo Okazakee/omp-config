@@ -37,7 +37,11 @@ fail() { echo "GATE FAILED: $*" >&2; exit 1; }
 mkdir -p "$STAGE"
 
 # ---------------------------------------------------------------- copy
+# config.yml and models.yml are handled below: their sensitive values are stripped
+# *during* the copy, so an unsanitized copy never exists under the repo at all —
+# not even in the window between copying and sanitizing.
 for f in "${FILES[@]}"; do
+	case "$f" in config.yml | models.yml) continue ;; esac
 	[ -f "$AGENT_DIR/$f" ] && cp -p "$AGENT_DIR/$f" "$STAGE/$f"
 done
 for d in "${DIRS[@]}"; do
@@ -53,16 +57,26 @@ strip() { # file what
 	printf '%s: %s removed (literal value) — supply it from the environment on restore\n' "$1" "$2" >> "$STRIPPED.new"
 }
 
-if [ -f "$STAGE/models.yml" ] && grep -qE '^[[:space:]]*apiKey:[[:space:]]*["'\'']?[^"'\''[:space:]]' "$STAGE/models.yml"; then
-	n=$(grep -cE '^[[:space:]]*apiKey:[[:space:]]*["'\'']?[^"'\''[:space:]]' "$STAGE/models.yml")
-	strip models.yml "$n literal apiKey value(s)"
-	sed -i -E 's|^([[:space:]]*apiKey:[[:space:]]*).*$|# \1# REMOVED by omp-config-sync — set from the environment|' "$STAGE/models.yml"
+# Strip on the way in: sed reads the live file and writes only the sanitized
+# result, so the raw value is never written under the repo, not even briefly.
+if [ -f "$AGENT_DIR/models.yml" ]; then
+	n=$(grep -cE '^[[:space:]]*apiKey:[[:space:]]*["'\'']?[^"'\''[:space:]]' "$AGENT_DIR/models.yml" || true)
+	if [ "${n:-0}" -gt 0 ]; then
+		strip models.yml "$n literal apiKey value(s)"
+		sed -E 's|^([[:space:]]*apiKey:[[:space:]]*).*$|# \1# REMOVED by omp-config-sync — set from the environment|' \
+			"$AGENT_DIR/models.yml" > "$STAGE/models.yml"
+	else
+		cp -p "$AGENT_DIR/models.yml" "$STAGE/models.yml"
+	fi
 fi
 
-if [ -f "$STAGE/config.yml" ]; then
-	if grep -qE '^[[:space:]]*token:[[:space:]]*\S' "$STAGE/config.yml"; then
+if [ -f "$AGENT_DIR/config.yml" ]; then
+	if grep -qE '^[[:space:]]*token:[[:space:]]*\S' "$AGENT_DIR/config.yml"; then
 		strip config.yml 'broker token'
-		sed -i -E 's|^([[:space:]]*token:[[:space:]]*).*$|\1# REMOVED by omp-config-sync — set auth.broker.token from the environment|' "$STAGE/config.yml"
+		sed -E 's|^([[:space:]]*token:[[:space:]]*).*$|\1# REMOVED by omp-config-sync — set auth.broker.token from the environment|' \
+			"$AGENT_DIR/config.yml" > "$STAGE/config.yml"
+	else
+		cp -p "$AGENT_DIR/config.yml" "$STAGE/config.yml"
 	fi
 fi
 
@@ -77,32 +91,44 @@ fi
 [ -s "$STRIPPED.new" ] && mv "$STRIPPED.new" "$STRIPPED" || { rm -f "$STRIPPED.new"; : > "$STRIPPED"; }
 
 # ---------------------------------------------------------------- gates
-echo "gate 1/4: token-shaped literals anywhere"
+echo "gate 1/5: token-shaped literals anywhere"
 HITS=$(grep -rInE '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' \
 	"$STAGE" --exclude-dir=.git || true)
 [ -z "$HITS" ] || { echo "$HITS" >&2; fail "token-shaped literal present (above)"; }
 
-echo "gate 2/4: credential-shaped values in config files"
+echo "gate 2/5: credential-shaped values in config files"
 # Scoped to config-shaped files on purpose: in source code `authorization = token…`
 # is ordinary TypeScript, and flagging it makes the gate cry wolf.
 CONF=$(find "$STAGE" -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.jsonc' \
 	-o -name '*.toml' -o -name '.mcp.json' -o -name '.env*' \) -not -path '*/.git/*' || true)
 # `-i` is load-bearing: config keys are camelCase (apiKey) as often as snake_case
 # (api_key), and a case-sensitive gate silently misses half of them.
-HITS=$(printf '%s' "$CONF" | xargs -r grep -inE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' 2>/dev/null | grep -vi 'env:' || true)
+HITS=$(printf '%s' "$CONF" | xargs -r grep -HinE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_./+-]{8,}' 2>/dev/null | grep -vi 'env:' || true)
 [ -z "$HITS" ] || { echo "$HITS" >&2; fail "credential-shaped value in a config file (above)"; }
 
-echo "gate 3/4: private keys and ssh material"
+echo "gate 3/5: private keys and ssh material"
 KEYS=$(grep -rlE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519) AAAA' "$STAGE" 2>/dev/null || true)
 [ -z "$KEYS" ] || { echo "$KEYS" >&2; fail "private key material present"; }
 
-echo "gate 4/4: trufflehog"
+echo "gate 4/5: trufflehog"
 if command -v trufflehog >/dev/null 2>&1; then
 	TH=$(trufflehog filesystem "$STAGE" --no-update --results=verified,unknown 2>/dev/null | grep -c '^Finding:' || true)
 	[ "${TH:-0}" -eq 0 ] || fail "trufflehog reported ${TH} finding(s)"
 	echo "  trufflehog clean"
 else
 	echo "  trufflehog not installed — skipped (install it: https://github.com/trufflesecurity/trufflehog)"
+fi
+
+echo "gate 5/5: credential literals in source (advisory)"
+# Advisory, not blocking: it needs a *quoted* literal, so `token = token.stdout…`
+# stays quiet, but a hardcoded key in a hook or extension gets surfaced in the
+# diff review rather than silently committed.
+SRC=$(find "$STAGE" -type f \( -name '*.ts' -o -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -not -path '*/.git/*' || true)
+# `-i` matters here for the same reason as gate 2: `apiKey` is camelCase.
+REVIEW=$(printf '%s' "$SRC" | xargs -r grep -HinE '(api[_-]?key|token|secret|password|passwd|authorization)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'']{12,}["'\'']' 2>/dev/null || true)
+if [ -n "$REVIEW" ]; then
+	echo "  REVIEW before pushing — quoted credential-looking literal in source:"
+	printf '%s\n' "$REVIEW" | sed 's/^/    /'
 fi
 
 # ---------------------------------------------------------------- pin versions
