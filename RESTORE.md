@@ -9,8 +9,8 @@ See [versions.env](versions.env). Restore installs whatever is pinned there.
 
 ## Steps on a new machine
 
-Run `bin/omp-config-restore` from this repo. It installs bun and omp if missing,
-then copies `agent/` into the active omp agent dir.
+Run `agent/skills/omp-config/bin/omp-config-restore` from this repo. It installs
+bun and omp if missing, then copies `agent/` into the active omp agent dir.
 
 Then, per provider: `/login <provider>` — or export the environment variables
 listed in `agent/.sanitized.txt`.

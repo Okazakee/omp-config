@@ -115,8 +115,8 @@ See [versions.env](versions.env). Restore installs whatever is pinned there.
 
 ## Steps on a new machine
 
-Run `bin/omp-config-restore` from this repo. It installs bun and omp if missing,
-then copies `agent/` into the active omp agent dir.
+Run `agent/skills/omp-config/bin/omp-config-restore` from this repo. It installs
+bun and omp if missing, then copies `agent/` into the active omp agent dir.
 
 Then, per provider: `/login <provider>` — or export the environment variables
 listed in `agent/.sanitized.txt`.
@@ -142,7 +142,7 @@ the machine that holds them. See [RESTORE.md](RESTORE.md) for what was stripped.
 | `agent/{tools,commands,rules,prompts,hooks,instructions}/` | the rest of the capability surface |
 | `versions.env` | pinned `omp` and `bun` versions, written at each backup |
 | `agent/.sanitized.txt` | which values were removed at backup time |
-| `bin/` | the backup and restore scripts |
+| `agent/skills/omp-config/bin/` | the backup and restore scripts |
 
 ## What is deliberately absent
 
@@ -154,8 +154,8 @@ machine state, not configuration.
 
 Needs only bash and curl:
 
-    curl -fsSL __REPO_URL__/raw/HEAD/agent/skills/omp-config/bin/omp-config-restore \
-      | bash -s -- --repo=__REPO_URL__.git
+    curl -fsSL __REPO_BASE__/raw/HEAD/agent/skills/omp-config/bin/omp-config-restore \
+      | bash -s -- --repo=__REPO_CLONE__
 
 The script installs bun if missing, installs the pinned omp version if it is
 missing or off-pin, copies `agent/` into the active omp agent directory, then
@@ -168,8 +168,8 @@ Flags: `--dry-run`, `--target=DIR` (restore into a scratch directory),
 
 Sync runs on demand, never on a timer:
 
-    bin/omp-config-sync            # copy, sanitize, gate, review diff, commit
-    bin/omp-config-sync --push     # commit, then push after its own confirmation
+    agent/skills/omp-config/bin/omp-config-sync            # copy, sanitize, gate, diff, commit
+    agent/skills/omp-config/bin/omp-config-sync --push     # commit, then push after confirming
 
 The sync copies an allowlist out of the omp agent directory, strips literal
 `apiKey:` and broker-token values, normalizes absolute home paths to `~/`, then
@@ -183,12 +183,12 @@ The extension package and its house rules are documented in
 [`agent/skills/omp-extensions/SKILL.md`](agent/skills/omp-extensions/SKILL.md).
 README_EOF
 
-RAW_URL="${REPO_URL:-}"
-if [ -z "$RAW_URL" ]; then
-	RAW_URL=$(git -C "$REPO" remote get-url origin 2>/dev/null || echo "")
-fi
-if [ -n "$RAW_URL" ]; then
-	sed -i "s|__REPO_URL__|$RAW_URL|g" "$REPO/README.md"
+REMOTE=$(git -C "$REPO" remote get-url origin 2>/dev/null || echo "")
+# An ssh remote cannot be curled; derive the browsable https base from it.
+BASE=$(printf '%s' "$REMOTE" | sed -E 's|^git@([^:]+):(.+)\.git$|https://\1/\2|; s|^ssh://git@([^/]+)/(.+)\.git$|https://\1/\2|; s|^https?://(.+)\.git$|https://\1|')
+if [ -n "$BASE" ]; then
+	sed -i "s|__REPO_BASE__|$BASE|g" "$REPO/README.md"
+	sed -i "s|__REPO_CLONE__|$REMOTE|g" "$REPO/README.md"
 fi
 
 # ---------------------------------------------------------------- commit

@@ -17,7 +17,7 @@ the machine that holds them. See [RESTORE.md](RESTORE.md) for what was stripped.
 | `agent/{tools,commands,rules,prompts,hooks,instructions}/` | the rest of the capability surface |
 | `versions.env` | pinned `omp` and `bun` versions, written at each backup |
 | `agent/.sanitized.txt` | which values were removed at backup time |
-| `bin/` | the backup and restore scripts |
+| `agent/skills/omp-config/bin/` | the backup and restore scripts |
 
 ## What is deliberately absent
 
@@ -29,8 +29,8 @@ machine state, not configuration.
 
 Needs only bash and curl:
 
-    curl -fsSL git@github.com:Okazakee/omp-config.git/raw/HEAD/agent/skills/omp-config/bin/omp-config-restore \
-      | bash -s -- --repo=git@github.com:Okazakee/omp-config.git.git
+    curl -fsSL https://github.com/Okazakee/omp-config/raw/HEAD/agent/skills/omp-config/bin/omp-config-restore \
+      | bash -s -- --repo=git@github.com:Okazakee/omp-config.git
 
 The script installs bun if missing, installs the pinned omp version if it is
 missing or off-pin, copies `agent/` into the active omp agent directory, then
@@ -43,8 +43,8 @@ Flags: `--dry-run`, `--target=DIR` (restore into a scratch directory),
 
 Sync runs on demand, never on a timer:
 
-    bin/omp-config-sync            # copy, sanitize, gate, review diff, commit
-    bin/omp-config-sync --push     # commit, then push after its own confirmation
+    agent/skills/omp-config/bin/omp-config-sync            # copy, sanitize, gate, diff, commit
+    agent/skills/omp-config/bin/omp-config-sync --push     # commit, then push after confirming
 
 The sync copies an allowlist out of the omp agent directory, strips literal
 `apiKey:` and broker-token values, normalizes absolute home paths to `~/`, then
