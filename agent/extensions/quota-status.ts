@@ -15,57 +15,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type } from "@oh-my-pi/omptype";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
-const Amount = type({
-	"used?": "number",
-	"limit?": "number",
-	"remaining?": "number",
-	"usedFraction?": "number",
-	unit: "string",
-});
-
-const Limit = type({
-	id: "string",
-	"label?": "string",
-	"window?": type({ "id?": "string", "label?": "string", "durationMs?": "number" }),
-	amount: Amount,
-});
-
-const Report = type({
-	provider: "string",
-	fetchedAt: "number",
-	"limits?": Limit.array(),
-});
-
-const UsageResponse = type({ reports: Report.array().optional() });
-
-const ProviderOverride = type({
-	"label?": "string",
-	"hidden?": "boolean",
-	"windows?": "string[]",
-	"windowLabels?": type.record("string", "string").optional(),
-	"extraLabels?": type.record("string", "string").optional(),
-});
-
-const Config = type({
-	"refreshMs?": "number",
-	"staleAfterMs?": "number",
-	"warnAt?": "number",
-	"criticalAt?": "number",
-	"shortIcon?": "string",
-	providers: type.record("string", ProviderOverride).optional(),
-});
-
-/** Credit balance for providers omp ships no usage provider for. */
-const CREDIT_ENDPOINTS: Record<string, string> = {
-	openrouter: "https://openrouter.ai/api/v1/credits",
-};
-
-const Credits = type({
-	data: type({ total_credits: "number", total_usage: "number" }),
-});
 
 interface UsageAmountValue {
 	used?: number;
@@ -104,6 +55,96 @@ interface Settings {
 	shortIcon?: string;
 	providers?: Record<string, ProviderSettings>;
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function optionalField(value: Record<string, unknown>, key: string, valid: (item: unknown) => boolean): boolean {
+	return value[key] === undefined || valid(value[key]);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+	return isRecord(value) && Object.values(value).every(item => typeof item === "string");
+}
+
+function isUsageAmount(value: unknown): value is UsageAmountValue {
+	return isRecord(value)
+		&& typeof value.unit === "string"
+		&& optionalField(value, "used", item => typeof item === "number")
+		&& optionalField(value, "limit", item => typeof item === "number")
+		&& optionalField(value, "remaining", item => typeof item === "number")
+		&& optionalField(value, "usedFraction", item => typeof item === "number");
+}
+
+function isUsageLimit(value: unknown): value is UsageLimitValue {
+	if (!isRecord(value) || typeof value.id !== "string" || !isUsageAmount(value.amount)) return false;
+	if (!optionalField(value, "label", item => typeof item === "string")) return false;
+	if (value.window === undefined) return true;
+	const window = value.window;
+	return isRecord(window)
+		&& optionalField(window, "id", item => typeof item === "string")
+		&& optionalField(window, "label", item => typeof item === "string")
+		&& optionalField(window, "durationMs", item => typeof item === "number");
+}
+
+function isUsageReport(value: unknown): value is UsageReportValue {
+	return isRecord(value)
+		&& typeof value.provider === "string"
+		&& typeof value.fetchedAt === "number"
+		&& optionalField(value, "limits", item => Array.isArray(item) && item.every(isUsageLimit));
+}
+
+function parseReports(value: unknown): UsageReportValue[] {
+	if (!isRecord(value) || (value.reports !== undefined && (!Array.isArray(value.reports) || !value.reports.every(isUsageReport)))) {
+		throw new TypeError("Invalid usage response");
+	}
+	return (value.reports ?? []) as UsageReportValue[];
+}
+
+function isProviderSettings(value: unknown): value is ProviderSettings {
+	return isRecord(value)
+		&& optionalField(value, "label", item => typeof item === "string")
+		&& optionalField(value, "hidden", item => typeof item === "boolean")
+		&& optionalField(value, "windows", item => Array.isArray(item) && item.every(entry => typeof entry === "string"))
+		&& optionalField(value, "windowLabels", isStringRecord)
+		&& optionalField(value, "extraLabels", isStringRecord);
+}
+
+function isSettings(value: unknown): value is Settings {
+	return isRecord(value)
+		&& optionalField(value, "refreshMs", item => typeof item === "number")
+		&& optionalField(value, "staleAfterMs", item => typeof item === "number")
+		&& optionalField(value, "warnAt", item => typeof item === "number")
+		&& optionalField(value, "criticalAt", item => typeof item === "number")
+		&& optionalField(value, "shortIcon", item => typeof item === "string")
+		&& optionalField(value, "providers", item => isRecord(item) && Object.values(item).every(isProviderSettings));
+}
+
+function isCredits(value: unknown): value is { data: { total_credits: number; total_usage: number } } {
+	return isRecord(value) && isRecord(value.data)
+		&& typeof value.data.total_credits === "number"
+		&& typeof value.data.total_usage === "number";
+}
+
+function isCommandCodeSummary(value: unknown): value is { totalMonthlyCredits?: number; totalCost?: number } {
+	return isRecord(value)
+		&& optionalField(value, "totalMonthlyCredits", item => typeof item === "number")
+		&& optionalField(value, "totalCost", item => typeof item === "number");
+}
+
+function isCommandCodeCredits(value: unknown): value is { credits: { monthlyCredits?: number; purchasedCredits?: number; freeCredits?: number } } {
+	if (!isRecord(value) || !isRecord(value.credits)) return false;
+	return optionalField(value.credits, "monthlyCredits", item => typeof item === "number")
+		&& optionalField(value.credits, "purchasedCredits", item => typeof item === "number")
+		&& optionalField(value.credits, "freeCredits", item => typeof item === "number");
+}
+
+
+/** Credit balance for providers omp ships no usage provider for. */
+const CREDIT_ENDPOINTS: Record<string, string> = {
+	openrouter: "https://openrouter.ai/api/v1/credits",
+};
 
 const STATUS_KEY = "quota";
 const REFRESH_MS = 300_000;
@@ -144,7 +185,8 @@ const WINDOW_LABELS: Record<string, string> = {
 function loadConfig(): Settings {
 	try {
 		const path = join(dirname(fileURLToPath(import.meta.url)), "..", "quota-status.json");
-		return Config.assert(JSON.parse(readFileSync(path, "utf8")));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		return isSettings(parsed) ? parsed : {};
 	} catch {
 		return {};
 	}
@@ -249,22 +291,14 @@ async function fetchCreditBalance(pi: ExtensionAPI, provider: string): Promise<n
 		const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` } });
 		if (!response.ok) return undefined;
 
-		const parsed = Credits(await response.json());
-		if (parsed instanceof type.errors) return undefined;
+		const parsed: unknown = await response.json();
+		if (!isCredits(parsed)) return undefined;
 		return parsed.data.total_credits - parsed.data.total_usage;
 	} catch {
 		return undefined;
 	}
 }
 
-const CCSummary = type({ "totalMonthlyCredits?": "number", "totalCost?": "number" });
-const CCCredits = type({
-	credits: type({
-		"monthlyCredits?": "number",
-		"purchasedCredits?": "number",
-		"freeCredits?": "number",
-	}),
-});
 
 /**
  * CommandCode publishes no monthly window: `/alpha/billing/credits` carries
@@ -284,9 +318,10 @@ async function fetchCommandCodeMonthly(pi: ExtensionAPI): Promise<number | undef
 		]);
 		if (!summaryRes.ok || !creditsRes.ok) return undefined;
 
-		const summary = CCSummary(await summaryRes.json());
-		const credits = CCCredits(await creditsRes.json());
-		if (summary instanceof type.errors || credits instanceof type.errors) return undefined;
+		const [summaryValue, creditsValue]: unknown[] = await Promise.all([summaryRes.json(), creditsRes.json()]);
+		if (!isCommandCodeSummary(summaryValue) || !isCommandCodeCredits(creditsValue)) return undefined;
+		const summary = summaryValue;
+		const credits = creditsValue;
 
 		const spent = summary.totalMonthlyCredits ?? summary.totalCost ?? 0;
 		const pool =
@@ -318,8 +353,7 @@ export default function quotaStatus(pi: ExtensionAPI): void {
 		const run = async (): Promise<void> => {
 			try {
 				const result = await pi.exec("omp", ["usage", "--json"], { timeout: 20_000 });
-				const parsed = UsageResponse(JSON.parse(result.stdout.slice(result.stdout.indexOf("{"))));
-				reports = parsed.reports ?? [];
+				reports = parseReports(JSON.parse(result.stdout.slice(result.stdout.indexOf("{"))));
 				if (reports.some(report => (report.limits?.length ?? 0) > 0)) lastDataAt = Date.now();
 			} catch {
 				return; // Keep the last rendered values rather than blanking the line.
