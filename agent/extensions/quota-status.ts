@@ -257,6 +257,7 @@ function renderReport(report: UsageReportValue, config: Settings, stale: boolean
 
 	const parts: string[] = [];
 	for (const limit of report.limits ?? []) {
+		if (report.provider === "commandcode" && limit.id.endsWith(":balance")) continue;
 		if (override?.windows && !override.windows.some(w => w === limit.window?.id || limit.id.endsWith(`:${w}`))) {
 			continue;
 		}
@@ -274,9 +275,7 @@ function renderReport(report: UsageReportValue, config: Settings, stale: boolean
 
 	const body = parts.filter(Boolean).join(" · ");
 	if (!body) return undefined;
-	// The status segment collapses runs of spaces, so staleness rides on the label.
-	const label = override?.label ?? report.provider;
-	return `${label}${stale ? "?" : ""} ${body}`;
+	return `${body}${stale ? "?" : ""}`;
 }
 
 /** Providers with no omp usage provider still get a balance, read via the CLI. */
@@ -395,11 +394,7 @@ export default function quotaStatus(pi: ExtensionAPI): void {
 
 			// No usage provider for this one (OpenRouter): show the credit balance.
 			const balance = credits.get(provider);
-			const label = config.providers?.[provider]?.label ?? provider;
-			ctx.ui.setStatus(
-				STATUS_KEY,
-				balance === undefined ? undefined : `${label} $${trimNumber(balance)}`,
-			);
+			ctx.ui.setStatus(STATUS_KEY, balance === undefined ? undefined : `$${trimNumber(balance)}`);
 		};
 
 		await run();
