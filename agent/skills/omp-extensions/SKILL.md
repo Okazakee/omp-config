@@ -1,6 +1,6 @@
 ---
 name: omp-extensions
-description: Authoring omp extensions: layout, ExtensionAPI, TUI seams, rules that don't break core.
+description: "Authoring omp extensions: layout, ExtensionAPI, TUI seams, rules that don't break core."
 ---
 
 # Authoring custom omp extensions
